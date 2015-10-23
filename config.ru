@@ -6,29 +6,44 @@ require "soda/exceptions"
 require "securerandom"
 require "net/http"
 require "sinatra/cookies"
-require "sinatra/cross_origin"
+require "uri"
 
 require "omniauth-socrata"
 
 require './cache.rb'
 
 class DevProxy < Sinatra::Base
+  # Session cookies
   enable :sessions
   set :session_secret, 'super duper secret'
 
-  # CORS
-  register Sinatra::CrossOrigin
-  enable :cross_origin
-  set :allow_origin, ENV['CORS_ORIGIN']
-  set :allow_methods, [:get, :options]
-  set :allow_credentials, true
+  # Normal cookies
+  helpers Sinatra::Cookies
+  set :cookie_options, {
+    :domain => ENV['DEV_SITE_DOMAIN'],
+    :httponly => false
+  }
+
+  CORS_HEADERS = {
+    # Only allow CORS from our dev site, and only read-only
+    "Access-Control-Allow-Origin" => "https://#{ENV['DEV_SITE_DOMAIN']}",
+    "Access-Control-Allow-Methods" => "OPTIONS,HEAD,GET",
+    "Access-Control-Allow-Credentials" => "true",
+    "Access-Control-Allow-Headers" => "*"
+  }
+
+  before do
+    puts "Request: #{request.path_info}"
+    puts "Return: #{session[:return]}"
+  end
 
   # Handle preflight requests for CORS
   options "*" do
-    response.headers["Allow"] = "GET,OPTIONS"
-    response.headers["Access-Control-Allow-Credentials"] = true
-    response.headers["Access-Control-Allow-Origin"] = ENV['CORS_ORIGIN']
-    200
+    [
+      200,
+      CORS_HEADERS,
+      nil
+    ]
   end
 
   get '/' do
@@ -37,22 +52,33 @@ class DevProxy < Sinatra::Base
 
   get "/logout" do
     session.clear # Bye bye auth
-    redirect to("http://dev.socrata.com")
+    cookies.clear # Bye bye shared info
+    redirect to("https://#{ENV['DEV_SITE_DOMAIN']}")
   end
 
   # Authenticated proxy for SODA requests
   get "/socrata/:domain/*" do
     # Security checks
-    if !session[:socrata_auth]
-      halt 403, "You have not authenticated with the proxy"
-    elsif session[:domain] != params["domain"]
-      halt 403, "You have not authenticated for domain #{params["domain"]}"
+    access_token = if session[:socrata_auth] && session[:domain] == params["domain"]
+      puts "Authenticating proxied request as #{session[:socrata_auth].extra.raw_info.email}"
+      session[:socrata_auth].credentials.token
+    else
+      puts "Passing on request unauthenticated"
+      nil
     end
 
     client = SODA::Client.new({
       :domain => params["domain"],
-      :access_token => session[:socrata_auth].credentials.token,
+      :access_token => access_token,
       :app_token => ENV["SOCRATA_APP_TOKEN"]
+    })
+
+    # We share common headers for all our responses
+    # TODO: I know this means we can only deal with JSON right now
+    # We should really copy the output type from the API response's headers
+    headers = CORS_HEADERS.merge({
+      "Content-Type" => "application/json",
+      "X-Socrata-Proxy" => request.host
     })
 
     begin
@@ -64,10 +90,7 @@ class DevProxy < Sinatra::Base
       # Proxy our results
       return [
         200,
-        {
-          "Content-Type" => "application/json",
-          "X-Socrata-Proxy" => request.host
-        },
+        headers,
         response.to_json
       ]
     rescue SODA::Exception => e
@@ -75,11 +98,8 @@ class DevProxy < Sinatra::Base
 
       # Pass it on!
       return [
-        e.http_code, 
-        {
-          "Content-Type" => "application/json",
-          "X-Socrata-Proxy" => request.host
-        },
+        e.http_code,
+        headers,
         e.http_body
       ]
     rescue RuntimeError
@@ -102,68 +122,31 @@ class DevProxy < Sinatra::Base
   end
   OmniAuth.config.full_host = ENV["SITE_ROOT"]
 
-  get '/login/:domain/:uid' do
+  get '/login/:domain' do
     # Stash it in the Sinatra session
-    session.clear
     session[:domain] = params["domain"]
-    session[:uid] = params["uid"]
+    session[:return] = params["return"]
 
     # Also stash it in the Rack session, for our middleware
     env['rack.session']['domain'] = params[:domain]
+    # TODO: Can I pass the domain information via the redirect instead of the session?
     redirect to("/auth/socrata")
   end
 
   get '/auth/socrata/callback' do
+    # Store our auth in a session cookie for security
     auth = request.env['omniauth.auth']
     session[:socrata_auth] = auth
 
-    redirect to("https://#{request.host.gsub(/^proxy\./, '')}/foundry/#/#{session[:domain]}/#{session[:uid]}/proxy")
+    cookies[:dev_proxy_domain] = session[:domain]
+    cookies[:dev_proxy_user] = auth.extra.raw_info.screenName
+
+    redirect to(session[:return])
   end
 
   get '/auth/failure' do
-    session.clear
-    "You lose!"
-  end
-
-  ########################################################################
-  # Github proxy that adds in secrets to get more requests. Also, caching.
-  ########################################################################
-  get "/github/*" do
-    response = Cache.instance.get("github|#{request.path}")
-    cached = true
-    if response.nil?
-      puts "Fetching #{request.path} from Github..."
-      uri = URI::HTTPS.build(
-        :host => "api.github.com",
-        :path => request.path.gsub(%r{^/github}, ""),
-        :query => [request.query_string,
-                   "client_id=#{ENV["GITHUB_CLIENT_ID"]}",
-                   "client_secret=#{ENV["GITHUB_CLIENT_SECRET"]}"].join("&")
-      )
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = true
-      http.verify_mode = OpenSSL::SSL::VERIFY_PEER
-
-      response = http.get(uri.request_uri)
-      Cache.instance.set("github|#{request.path}", response)
-      cached = false
-    end
-
-    cache_control :public
-    status response.code
-    headers \
-      "Access-Control-Allow-Origin" => request.base_url.gsub(%r{/proxy\.}, "/"),
-      "Content-Type" => "application/json",
-      "X-Proxy-Cached" => cached.to_s
-    body response.body
-  end
-
-  def error_page(title, body='')
-    "<html>" +
-      "<head><title>#{title}</title></head>" +
-      "<body><h1>#{title}</h1>#{body}</body>" +
-      "</html>"
+    puts "Auth Failed: " + params.inspect
+    redirect to("/login/#{session[:domain]}?return=#{URI.escape(session[:return])}")
   end
 end
 
