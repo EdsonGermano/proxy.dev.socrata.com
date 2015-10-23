@@ -32,11 +32,6 @@ class DevProxy < Sinatra::Base
     "Access-Control-Allow-Headers" => "*"
   }
 
-  before do
-    puts "Request: #{request.path_info}"
-    puts "Return: #{session[:return]}"
-  end
-
   # Handle preflight requests for CORS
   options "*" do
     [
@@ -50,7 +45,7 @@ class DevProxy < Sinatra::Base
     redirect to('/auth/socrata')
   end
 
-  get "/logout" do
+  get "/logout/" do
     session.clear # Bye bye auth
     cookies.clear # Bye bye shared info
     redirect to("https://#{ENV['DEV_SITE_DOMAIN']}")
@@ -102,10 +97,10 @@ class DevProxy < Sinatra::Base
         headers,
         e.http_body
       ]
-    rescue RuntimeError
+    rescue RuntimeError => e
       puts "Internal Error: #{e.inspect}"
 
-      halt 500, "Internal Server Error"
+      return [500, headers, "Internal Server Error"]
     end
   end
 
