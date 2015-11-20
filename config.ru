@@ -143,6 +143,28 @@ class DevProxy < Sinatra::Base
     puts "Auth Failed: " + params.inspect
     redirect to("/login/#{session[:domain]}?return=#{URI.escape(session[:return])}")
   end
+
+  get '/athena/*' do
+    headers = CORS_HEADERS.merge({
+      "Content-Type" => "application/json",
+      "X-Socrata-Proxy" => request.host
+    })
+
+    begin
+      puts params['splat'].inspect
+      res = Net::HTTP.get_response(URI('http://socrata-athena.herokuapp.com/' + params['splat'].first))
+
+      return [
+        res.code.to_i,
+        CORS_HEADERS.merge(res.to_hash),
+        res.body
+      ]
+    rescue RuntimeError => e
+      puts "Internal Error: #{e.inspect}"
+
+      return [500, headers, "Internal Server Error"]
+    end
+  end
 end
 
 run DevProxy
