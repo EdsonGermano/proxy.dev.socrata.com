@@ -54,9 +54,9 @@ class DevProxy < Sinatra::Base
   # Authenticated proxy for SODA requests
   get "/socrata/:domain/*" do
     # Security checks
-    access_token = if session[:socrata_auth] && session[:domain] == params["domain"]
-      puts "Authenticating proxied request as #{session[:socrata_auth].extra.raw_info.email}"
-      session[:socrata_auth].credentials.token
+    access_token = if session[:socrata_auth_token] && session[:domain] == params["domain"]
+      puts "Authenticating proxied request as #{session[:socrata_auth_email]}"
+      session[:socrata_auth_token]
     else
       puts "Passing on request unauthenticated"
       nil
@@ -131,7 +131,8 @@ class DevProxy < Sinatra::Base
   get '/auth/socrata/callback' do
     # Store our auth in a session cookie for security
     auth = request.env['omniauth.auth']
-    session[:socrata_auth] = auth
+    session[:socrata_auth_token] = auth.credentials.token
+    session[:socrata_auth_email] = auth.extra.raw_info.email
 
     cookies[:dev_proxy_domain] = session[:domain]
     cookies[:dev_proxy_user] = auth.extra.raw_info.screenName
