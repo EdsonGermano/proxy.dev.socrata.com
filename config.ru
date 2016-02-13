@@ -145,6 +145,7 @@ class DevProxy < Sinatra::Base
     redirect to("/login/#{session[:domain]}?return=#{URI.escape(session[:return])}")
   end
 
+  # Proxy for Athena requests to do CORS
   get '/athena/*' do
     headers = CORS_HEADERS.merge({
       "Content-Type" => "application/json",
@@ -159,6 +160,36 @@ class DevProxy < Sinatra::Base
         res.code.to_i,
         CORS_HEADERS.merge(res.to_hash),
         res.body
+      ]
+    rescue RuntimeError => e
+      puts "Internal Error: #{e.inspect}"
+
+      return [500, headers, "Internal Server Error"]
+    end
+  end
+
+  # Proxy for GitHub requests, to add in authentication details
+  get '/github/*' do
+    begin
+      uri = URI('https://api.github.com/' + params['splat'].first)
+
+      # Merge in our GitHub authentication details
+      uri.query = [uri.query,
+                   "client_id=#{ENV['GITHUB_CLIENT_ID']}",
+                   "client_secret=#{ENV['GITHUB_CLIENT_SECRET']}"].join("&")
+
+      res = Net::HTTP.get_response(uri)
+      code = res.code.to_i
+      # Strip out some headers that cause problems
+      headers = res.to_hash.reject { |k, v|
+        ["status", "transfer-encoding"].include?(k.downcase)
+      }.merge(CORS_HEADERS)
+      body = res.body
+
+      return [
+        code,
+        headers,
+        body
       ]
     rescue RuntimeError => e
       puts "Internal Error: #{e.inspect}"

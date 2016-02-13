@@ -13,3 +13,7 @@ gem 'addressable'
 gem 'dalli'
 gem 'memcachier'
 gem 'sinatra-contrib'
+
+group :development do
+  gem 'pry'
+end
