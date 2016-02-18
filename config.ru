@@ -174,10 +174,16 @@ class DevProxy < Sinatra::Base
       uri = URI('https://api.github.com/' + params['splat'].first)
 
       # Merge in our GitHub authentication details
-      uri.query = [uri.query,
-                   "client_id=#{ENV['GITHUB_CLIENT_ID']}",
-                   "client_secret=#{ENV['GITHUB_CLIENT_SECRET']}"].join("&")
+      uri.query = params
+        .reject { |k,v| k == "splat" }
+        .merge({
+          "client_id" => ENV['GITHUB_CLIENT_ID'],
+          "client_secret" => ENV['GITHUB_CLIENT_SECRET']
+        })
+        .collect { |k,v| "#{k}=#{v}" }
+        .join("&")
 
+      puts "Passing #{uri.query.inspect} to GitHub..."
       res = Net::HTTP.get_response(uri)
       code = res.code.to_i
       # Strip out some headers that cause problems
