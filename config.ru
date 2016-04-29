@@ -1,14 +1,16 @@
-require "rubygems"
-require "bundler/setup"
-require "sinatra"
-require "soda/client"
-require "soda/exceptions"
-require "securerandom"
-require "net/http"
-require "sinatra/cookies"
-require "uri"
+require 'rubygems'
+require 'bundler/setup'
+require 'sinatra'
+require 'soda/client'
+require 'soda/exceptions'
+require 'securerandom'
+require 'net/http'
+require 'sinatra/cookies'
+require 'uri'
+require 'erb'
+require 'active_support/inflector'
 
-require "omniauth-socrata"
+require 'omniauth-socrata'
 
 require './cache.rb'
 
@@ -65,7 +67,8 @@ class DevProxy < Sinatra::Base
     client = SODA::Client.new({
       :domain => params["domain"],
       :access_token => access_token,
-      :app_token => ENV["SOCRATA_APP_TOKEN"]
+      :app_token => ENV["SOCRATA_APP_TOKEN"],
+      :ignore_ssl => ENV["IGNORE_SSL"] == "true"
     })
 
     # We share common headers for all our responses
@@ -90,6 +93,184 @@ class DevProxy < Sinatra::Base
       ]
     rescue SODA::Exception => e
       puts "SODA::Exception: #{e.inspect}"
+
+      # Pass it on!
+      return [
+        e.http_code,
+        headers,
+        e.http_body
+      ]
+    rescue RuntimeError => e
+      puts "Internal Error: #{e.inspect}"
+
+      return [500, headers, "Internal Server Error"]
+    end
+  end
+
+  def generate_parameters(metadata, soql_json)
+    # Dataset Properties
+    parameters = metadata.columns
+    .reject { |f| soql_json.datatypes[f.dataTypeName].definition.type == "object" }
+    .collect do |f|
+      {
+        name: f.fieldName,
+        in: :query,
+        description: f.description,
+        required: false
+      }
+      .merge(soql_json.datatypes[f.dataTypeName].definition)
+      .reject { |k, v| v.nil? }
+    end
+
+    return parameters + soql_json.parameters.values
+  end
+
+  def generate_responses(metadata, soql_json, entity_name)
+    return soql_json.response_codes.inject({}) do |mem, resp|
+      mem[resp.first] = case resp.first
+                        when "200"
+                          {
+                            description: "A set of #{entity_name.pluralize.capitalize} matching your query",
+                            schema: {
+                              type: :array,
+                              items: {
+                                :$ref => "#/definitions/#{entity_name.capitalize}"
+                              }
+                            }
+                          }
+                        when "202"
+                          {
+                            description: "Your query is in-flight and may be retried"
+                          }
+                        else
+                          {
+                            description: "#{resp.last.name}: #{resp.last.description}",
+                            schema: {
+                              :$ref => "#/definitions/#{resp.last.response}"
+                            }
+                          }
+                        end
+      mem
+    end
+  end
+
+  def generate_definitions(metadata, soql_json, entity_name)
+    return soql_json.standard_responses.merge({
+      entity_name.capitalize => {
+        type: :object,
+        properties: metadata.columns.inject({}) { |mem, f|
+          field = {
+            description: f.description,
+          }
+          .merge(soql_json.datatypes[f.dataTypeName].definition)
+          .reject { |k, v| v.nil? }
+
+
+          mem[f.fieldName] = field
+          mem
+        }
+      }
+    })
+  end
+
+  # Authenticated OpenAPI spec generation
+  get "/openapi/:domain/:uid" do
+    # We share common headers for all our responses
+    headers = CORS_HEADERS.merge({
+      "Content-Type" => "application/json",
+      "X-Socrata-Proxy" => request.host
+    })
+
+    # Security checks
+    access_token = if session[:socrata_auth_token] && session[:domain] == params["domain"]
+      puts "Authenticating openapi request as #{session[:socrata_auth_email]}"
+      session[:socrata_auth_token]
+    else
+      # For unauthenticated requests, we allow CORS requests from other sites
+      headers["Access-Control-Allow-Origin"] = "https://#{ENV['DEV_SITE_DOMAIN']}"
+
+      puts "Passing on request unauthenticated"
+      nil
+    end
+
+    client = SODA::Client.new({
+      :domain => params["domain"],
+      :access_token => access_token,
+      :app_token => ENV["SOCRATA_APP_TOKEN"],
+      :ignore_ssl => ENV["IGNORE_SSL"] == "true"
+    })
+
+    begin
+      domain = params[:domain]
+      uid = params[:uid]
+      metadata = client.get("https://#{domain}/api/views/#{uid}.json")
+      soql_json = client.get(ENV['SOQL_JSON'])
+      version = metadata.newBackend ? "2.1" : "2.0"
+
+      begin
+        # Alas, I stll need to fetch OBE metadata for datasets...
+        migration = client.get("https://#{domain}/api/migrations/#{uid}.json")
+        obe_metadata = client.get("https://#{domain}/api/views/#{migration.obeId}.json")
+
+        metadata = obe_metadata.merge({"columns" => metadata.columns})
+      rescue SODA::Exception => e
+        puts "Caught an exception fetching migrations. Let's just swallow this and hope things work out"
+        $stderr.puts e.inspect
+      end
+
+      # We have to do a little column meta munging, because reasons
+      metadata.columns.each do |col|
+        col.dataTypeName = case col.dataTypeName
+                           when "calendar_date"
+                             "floating_timestamp"
+                           else
+                             col.dataTypeName
+                           end
+      end
+
+      # Now we generate a gigantic JSON document
+      entity_name = metadata.rowLabel || "record"
+      formats = ["application/json"] # TODO: Other output types?
+
+      openapi = {
+        swagger: '2.0',
+        info: {
+          version: version,
+          title: metadata.name,
+          description: metadata.description,
+          termsOfService: "https://www.socrata.com/terms-of-service/",
+          contact: {
+            name: domain
+          }
+        },
+        host: domain,
+        basePath: "/",
+        schemes: [
+          :https
+        ],
+        produces: formats,
+        paths: {
+          "/resource/#{uid}" => {
+            get: {
+              description: "Returns all #{entity_name.pluralize}",
+              operationId: "query#{entity_name.pluralize.capitalize}",
+              produces: formats,
+              parameters: generate_parameters(metadata, soql_json),
+              responses: generate_responses(metadata, soql_json, entity_name)
+            }
+          }
+        },
+        definitions: generate_definitions(metadata, soql_json, entity_name)
+      }
+
+      return [
+        200,
+        headers,
+        JSON.pretty_generate(openapi)
+      ]
+    rescue SODA::Exception => e
+      puts "SODA::Exception: #{e.inspect}, #{e.http_body}"
+      puts e.backtrace.join ", "
 
       # Pass it on!
       return [
@@ -203,6 +384,7 @@ class DevProxy < Sinatra::Base
       return [500, headers, "Internal Server Error"]
     end
   end
+
 end
 
 run DevProxy
