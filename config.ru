@@ -187,7 +187,7 @@ class DevProxy < Sinatra::Base
       session[:socrata_auth_token]
     else
       # For unauthenticated requests, we allow CORS requests from other sites
-      headers["Access-Control-Allow-Origin"] = "https://#{ENV['DEV_SITE_DOMAIN']}"
+      headers["Access-Control-Allow-Origin"] = "*"
 
       puts "Passing on request unauthenticated"
       nil
