@@ -210,12 +210,32 @@ class DevProxy < Sinatra::Base
       begin
         # Alas, I stll need to fetch OBE metadata for datasets...
         migration = client.get("https://#{domain}/api/migrations/#{uid}.json")
+
+        # If we're on OBE, and we've got an NBE dataset to redirect to, send them there
+        if !metadata.newBackend && migration.nbeId
+          puts "Redirecting to 2.1 version of this API"
+          return [
+            302,
+            headers.merge("Location" => "#{ENV['SITE_ROOT']}/openapi/#{domain}/#{migration.nbeId}"),
+            nil
+          ]
+        end
+
         obe_metadata = client.get("https://#{domain}/api/views/#{migration.obeId}.json")
 
         metadata = obe_metadata.merge({"columns" => metadata.columns})
       rescue SODA::Exception => e
-        puts "Caught an exception fetching migrations. Let's just swallow this and hope things work out"
-        $stderr.puts e.inspect
+        if !metadata.newBackend
+          # Ah crap. An OBE-only dataset. Well, we have little option other than just to fail
+          return [
+            404,
+            headers,
+            "OpenAPI specifications are unavailable for filtered views and 2.0-only datasets"
+          ]
+        else
+          puts "Caught an exception fetching migrations. Let's just swallow this and hope things work out"
+          $stderr.puts e.inspect
+        end
       end
 
       # We have to do a little column meta munging, because reasons
