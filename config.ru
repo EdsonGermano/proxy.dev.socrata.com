@@ -114,7 +114,7 @@ class DevProxy < Sinatra::Base
     .collect do |f|
       {
         name: f.fieldName,
-        in: :query,
+        in: "query",
         description: f.description,
         required: false
       }
@@ -132,7 +132,7 @@ class DevProxy < Sinatra::Base
                           {
                             description: "A set of #{entity_name.pluralize.capitalize} matching your query",
                             schema: {
-                              type: :array,
+                              type: "array",
                               items: {
                                 :$ref => "#/definitions/#{entity_name.capitalize}"
                               }
@@ -157,7 +157,7 @@ class DevProxy < Sinatra::Base
   def generate_definitions(metadata, soql_json, entity_name)
     return soql_json.standard_responses.merge({
       entity_name.capitalize => {
-        type: :object,
+        type: "object",
         properties: metadata.columns.inject({}) { |mem, f|
           field = {
             description: f.description,
@@ -174,7 +174,13 @@ class DevProxy < Sinatra::Base
   end
 
   # Authenticated OpenAPI spec generation
-  get "/openapi/:domain/:uid" do
+  get "/openapi/:domain/:uid.?:format?" do
+    # Pick our format
+    format = params["format"]
+    if format.nil?
+      format = "json"
+    end
+
     # We share common headers for all our responses
     headers = CORS_HEADERS.merge({
       "Content-Type" => "application/json",
@@ -252,7 +258,7 @@ class DevProxy < Sinatra::Base
       entity_name = metadata.rowLabel || "record"
       formats = ["application/json"] # TODO: Other output types?
 
-      openapi = {
+      openapi = Hashie::Mash.new({
         swagger: '2.0',
         info: {
           version: version,
@@ -266,7 +272,7 @@ class DevProxy < Sinatra::Base
         host: domain,
         basePath: "/",
         schemes: [
-          :https
+          "https"
         ],
         produces: formats,
         paths: {
@@ -281,12 +287,20 @@ class DevProxy < Sinatra::Base
           }
         },
         definitions: generate_definitions(metadata, soql_json, entity_name)
-      }
+      })
 
+      output = case params["format"]
+               when "yaml"
+                 headers["Content-type"] = "text/x-yaml"
+                 openapi.stringify_keys.to_hash.to_yaml
+               else
+                 # Either they asked for JSON, or they're getting it...
+                 openapi.to_hash.to_json
+               end
       return [
         200,
         headers,
-        JSON.pretty_generate(openapi)
+        output
       ]
     rescue SODA::Exception => e
       puts "SODA::Exception: #{e.inspect}, #{e.http_body}"
