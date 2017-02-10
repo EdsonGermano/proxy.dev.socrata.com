@@ -56,9 +56,17 @@ class DevProxy < Sinatra::Base
   # For debugging and development purposes, grab the current token
   get "/socrata/:domain/token" do
     if session[:socrata_auth_token] && session[:domain] == params["domain"]
-      return { :auth_token => session[:socrata_auth_token] }.to_json
+      return [
+        200,
+        { "Content-Type" => "application/json" },
+        { :auth_token => session[:socrata_auth_token] }.to_json
+      ]
     else
-      return { :error => "Not authenticated!" }.to_json
+      return [
+        403,
+        { "Content-Type" => "application/json" },
+        { :error => "Not authenticated!" }.to_json
+      ]
     end
   end
 
