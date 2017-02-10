@@ -53,6 +53,15 @@ class DevProxy < Sinatra::Base
     redirect to("https://#{ENV['DEV_SITE_DOMAIN']}")
   end
 
+  # For debugging and development purposes, grab the current token
+  get "/socrata/:domain/token" do
+    if session[:socrata_auth_token] && session[:domain] == params["domain"]
+      return { :auth_token => session[:socrata_auth_token] }.to_json
+    else
+      return { :error => "Not authenticated!" }.to_json
+    end
+  end
+
   # Authenticated proxy for SODA requests
   get "/socrata/:domain/*" do
     # Security checks
